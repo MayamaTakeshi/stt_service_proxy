@@ -9,68 +9,14 @@ import (
     "os"
     "path/filepath"
 
-    "encoding/base64"
-    "net"
-    "net/http"
-    "net/url"
-
-    "google.golang.org/api/option"
-    "google.golang.org/grpc"
-    "google.golang.org/grpc/credentials/insecure"
-
     speech "cloud.google.com/go/speech/apiv1"
     "cloud.google.com/go/speech/apiv1/speechpb"
 
-    "google.golang.org/grpc/grpclog"
-
+    //"google.golang.org/grpc/grpclog"
 )
 
-// Helper function for basic authentication
-func basicAuth(username, password string) string {
-    return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-}
-
-// Custom dialer that routes gRPC through an HTTP proxy
-func dialerWithProxy(ctx context.Context, addr string) (net.Conn, error) {
-    proxyURL, err := http.ProxyFromEnvironment(&http.Request{
-        URL: &url.URL{
-            Scheme: "https",
-            Host:   addr,
-        },
-    })
-    if err != nil {
-        return nil, err
-    }
-
-    if proxyURL == nil {
-        // No proxy, dial directly
-        return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
-    }
-
-    // Dial through proxy
-    conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyURL.Host)
-    if err != nil {
-        return nil, err
-    }
-
-    // Send a CONNECT request to the proxy to establish a tunnel to the gRPC server
-    connectReq := &http.Request{
-        Method: "CONNECT",
-        URL:    &url.URL{Host: addr},
-        Host:   addr,
-        Header: make(http.Header),
-    }
-    if proxyAuth := proxyURL.User; proxyAuth != nil {
-        password, _ := proxyAuth.Password()
-        connectReq.Header.Set("Proxy-Authorization", "Basic "+basicAuth(proxyAuth.Username(), password))
-    }
-
-    connectReq.Write(conn)
-    return conn, nil
-}
-
 func main() {
-    grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stdout, os.Stderr, os.Stderr))
+    //grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stdout, os.Stderr, os.Stderr))
 
     flag.Usage = func() {
         fmt.Fprintf(os.Stderr, "Usage: %s <AUDIOFILE>\n", filepath.Base(os.Args[0]))
@@ -85,19 +31,7 @@ func main() {
 
     ctx := context.Background()
 
-    // Set up gRPC connection with custom dialer
-    conn, err := grpc.DialContext(
-        ctx,
-        "speech.googleapis.com:443",
-        grpc.WithContextDialer(dialerWithProxy),
-        grpc.WithTransportCredentials(insecure.NewCredentials()), // Use `insecure.NewCredentials()` for plaintext. Replace with `credentials.NewTLS()` if TLS is needed.
-    )
-    if err != nil {
-        log.Fatalf("Failed to create gRPC connection: %v", err)
-    }
-    defer conn.Close()
-
-    client, err := speech.NewClient(ctx, option.WithGRPCConn(conn))
+    client, err := speech.NewClient(ctx)
     if err != nil {
         log.Fatalf("Failed to create Speech client: %v", err)
     }
