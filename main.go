@@ -2,108 +2,156 @@ package main
 
 import (
     "context"
-    "flag"
+    "encoding/json"
     "fmt"
     "io"
     "log"
-    "os"
-    "path/filepath"
+    "net/http"
 
+    "github.com/gorilla/websocket"
     speech "cloud.google.com/go/speech/apiv1"
-    "cloud.google.com/go/speech/apiv1/speechpb"
-
-    //"google.golang.org/grpc/grpclog"
+    speechpb "google.golang.org/genproto/googleapis/cloud/speech/v1"
 )
 
-func main() {
-    //grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stdout, os.Stderr, os.Stderr))
+var upgrader = websocket.Upgrader{
+    ReadBufferSize:  1024,
+    WriteBufferSize: 1024,
+}
 
-    flag.Usage = func() {
-        fmt.Fprintf(os.Stderr, "Usage: %s <AUDIOFILE>\n", filepath.Base(os.Args[0]))
-        fmt.Fprintf(os.Stderr, "<AUDIOFILE> must be a path to a local audio file. Audio file must be a 16-bit signed little-endian encoded with a sample rate of 16000.\n")
-
-    }
-    flag.Parse()
-    if len(flag.Args()) != 1 {
-        log.Fatal("Please pass path to your local audio file as a command line argument")
-    }
-    audioFile := flag.Arg(0)
-
+func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
     ctx := context.Background()
-
     client, err := speech.NewClient(ctx)
     if err != nil {
-        log.Fatalf("Failed to create Speech client: %v", err)
+        return fmt.Errorf("failed to create speech client: %v", err)
     }
     defer client.Close()
 
-    log.Println("creating stream")
     stream, err := client.StreamingRecognize(ctx)
     if err != nil {
-        log.Fatal(err)
+        return fmt.Errorf("failed to create stream: %v", err)
     }
-    log.Println("stream created")
-    // Send the initial configuration message.
+    defer stream.CloseSend()
+
+    // Send the initial request with configuration for the stream
+    config := &speechpb.RecognitionConfig{
+        Encoding:        speechpb.RecognitionConfig_LINEAR16,
+        SampleRateHertz: 16000,
+        LanguageCode:    lang,
+        EnableAutomaticPunctuation: true,
+    }
+    streamingConfig := &speechpb.StreamingRecognitionConfig{
+        Config:         config,
+        InterimResults: true,
+        SingleUtterance: false,
+    }
+
     if err := stream.Send(&speechpb.StreamingRecognizeRequest{
         StreamingRequest: &speechpb.StreamingRecognizeRequest_StreamingConfig{
-            StreamingConfig: &speechpb.StreamingRecognitionConfig{
-                Config: &speechpb.RecognitionConfig{
-                    Encoding:        speechpb.RecognitionConfig_LINEAR16,
-                    SampleRateHertz: 16000,
-                    LanguageCode:    "en-US",
-                },
-            },
+            StreamingConfig: streamingConfig,
         },
     }); err != nil {
-        log.Fatal(err)
+        return fmt.Errorf("failed to send config request: %v", err)
     }
 
-    f, err := os.Open(audioFile)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer f.Close()
-
+    // Handle incoming audio and recognition responses
     go func() {
-        buf := make([]byte, 1024)
         for {
-            n, err := f.Read(buf)
-            if n > 0 {
-                if err := stream.Send(&speechpb.StreamingRecognizeRequest{
-                    StreamingRequest: &speechpb.StreamingRecognizeRequest_AudioContent{
-                        AudioContent: buf[:n],
-                    },
-                }); err != nil {
-                    log.Printf("Could not send audio: %v", err)
-                }
-            }
+            resp, err := stream.Recv()
             if err == io.EOF {
-                // Nothing else to pipe, close the stream.
-                if err := stream.CloseSend(); err != nil {
-                    log.Fatalf("Could not close stream: %v", err)
-                }
-                return
+                break
             }
             if err != nil {
-                log.Printf("Could not read from %s: %v", audioFile, err)
+                log.Printf("Error receiving response: %v", err)
+                break
+            }
+            if resp.Error != nil {
+                log.Printf("Speech API error: %v", resp.Error)
                 continue
+            }
+            for _, result := range resp.Results {
+                if result.IsFinal {
+                    log.Printf("Final transcript: %s\n", result.Alternatives[0].Transcript)
+                    conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"transcript": "%s"}`, result.Alternatives[0].Transcript)))
+                } else {
+                    log.Printf("Interim transcript: %s\n", result.Alternatives[0].Transcript)
+                    conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"interim_transcript": "%s"}`, result.Alternatives[0].Transcript)))
+                }
             }
         }
     }()
 
+    // Read and forward the binary audio data to Google Speech API
     for {
-        resp, err := stream.Recv()
-        if err == io.EOF {
-            break
-        }
+        messageType, audioData, err := conn.ReadMessage()
         if err != nil {
-            log.Fatalf("Cannot stream results: %v", err)
+            log.Println("Error reading WebSocket message:", err)
+            return err
         }
-        if err := resp.Error; err != nil {
-            log.Fatalf("Could not recognize: %v", err)
+
+        // Handle text (commands) vs binary (audio data)
+        if messageType == websocket.TextMessage {
+            log.Println("Received text message when expecting audio, ignoring.")
+            continue
         }
-        for _, result := range resp.Results {
-            fmt.Printf("Result: %+v\n", result)
+
+        fmt.Println(audioData)
+        if messageType == websocket.BinaryMessage {
+            if err := stream.Send(&speechpb.StreamingRecognizeRequest{
+                StreamingRequest: &speechpb.StreamingRecognizeRequest_AudioContent{
+                    AudioContent: audioData,
+                },
+            }); err != nil {
+                return fmt.Errorf("failed to send audio content: %v", err)
+            }
         }
     }
 }
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        log.Println("Error upgrading to WebSocket:", err)
+        return
+    }
+    defer conn.Close()
+
+    for {
+        messageType, message, err := conn.ReadMessage()
+        if err != nil {
+            log.Println("Error reading message:", err)
+            break
+        }
+
+        if messageType == websocket.TextMessage {
+            // Expecting JSON command, attempt to parse it
+            var command map[string]interface{}
+            if err := json.Unmarshal(message, &command); err != nil {
+                log.Println("Error parsing JSON:", err)
+                continue
+            }
+
+            if command["type"] == "start_speech_to_text" {
+                language, _ := command["language"].(string)
+                voiceActivityTimeout, _ := command["voiceActivityTimeout"].(float64)
+
+                log.Printf("Starting speech-to-text with language: %s, timeout: %.0f seconds", language, voiceActivityTimeout)
+
+                // Start speech-to-text with the given language and timeout
+                err := speechToText(conn, language, int(voiceActivityTimeout))
+                if err != nil {
+                    log.Println("Error during speech-to-text:", err)
+                }
+            }
+        } else {
+            log.Println("Received non-text message when expecting command, ignoring.")
+        }
+    }
+}
+
+func main() {
+    http.HandleFunc("/ws", wsHandler)
+    listen := "192.168.88.136:9090"
+    log.Printf("Server started on %s", listen)
+    log.Fatal(http.ListenAndServe(listen, nil))
+}
+
