@@ -11,6 +11,9 @@ import (
     "github.com/gorilla/websocket"
     speech "cloud.google.com/go/speech/apiv1"
     speechpb "google.golang.org/genproto/googleapis/cloud/speech/v1"
+
+    "os"
+    "google.golang.org/grpc/grpclog"
 )
 
 var upgrader = websocket.Upgrader{
@@ -41,8 +44,8 @@ func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
     }
     streamingConfig := &speechpb.StreamingRecognitionConfig{
         Config:         config,
-        InterimResults: true,
-        SingleUtterance: false,
+        InterimResults: false,
+        SingleUtterance: true,
     }
 
     if err := stream.Send(&speechpb.StreamingRecognizeRequest{
@@ -71,6 +74,7 @@ func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
             for _, result := range resp.Results {
                 if result.IsFinal {
                     log.Printf("Final transcript: %s\n", result.Alternatives[0].Transcript)
+		    stream.CloseSend()
                     conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"transcript": "%s"}`, result.Alternatives[0].Transcript)))
                 } else {
                     log.Printf("Interim transcript: %s\n", result.Alternatives[0].Transcript)
@@ -94,7 +98,7 @@ func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
             continue
         }
 
-        fmt.Println(audioData)
+        //fmt.Println(audioData)
         if messageType == websocket.BinaryMessage {
             if err := stream.Send(&speechpb.StreamingRecognizeRequest{
                 StreamingRequest: &speechpb.StreamingRecognizeRequest_AudioContent{
@@ -149,6 +153,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+    grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stdout, os.Stderr, os.Stderr))
+
     http.HandleFunc("/ws", wsHandler)
     listen := "192.168.88.136:9090"
     log.Printf("Server started on %s", listen)
