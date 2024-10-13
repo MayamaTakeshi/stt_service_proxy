@@ -40,12 +40,12 @@ func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
         Encoding:        speechpb.RecognitionConfig_LINEAR16,
         SampleRateHertz: 16000,
         LanguageCode:    lang,
-        EnableAutomaticPunctuation: true,
+        //EnableAutomaticPunctuation: true,
     }
     streamingConfig := &speechpb.StreamingRecognitionConfig{
         Config:         config,
-        InterimResults: false,
-        SingleUtterance: true,
+        //InterimResults: false,
+        //SingleUtterance: true,
     }
 
     if err := stream.Send(&speechpb.StreamingRecognizeRequest{
@@ -74,7 +74,6 @@ func speechToText(conn *websocket.Conn, lang string, voiceTimeout int) error {
             for _, result := range resp.Results {
                 if result.IsFinal {
                     log.Printf("Final transcript: %s\n", result.Alternatives[0].Transcript)
-		    stream.CloseSend()
                     conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"transcript": "%s"}`, result.Alternatives[0].Transcript)))
                 } else {
                     log.Printf("Interim transcript: %s\n", result.Alternatives[0].Transcript)
@@ -156,7 +155,7 @@ func main() {
     grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stdout, os.Stderr, os.Stderr))
 
     http.HandleFunc("/ws", wsHandler)
-    listen := "192.168.88.136:9090"
+    listen := "127.0.0.1:9090"
     log.Printf("Server started on %s", listen)
     log.Fatal(http.ListenAndServe(listen, nil))
 }

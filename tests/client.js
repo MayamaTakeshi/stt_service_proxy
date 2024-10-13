@@ -3,7 +3,7 @@ const mic = require('mic');
 const fs = require('fs');
 
 // WebSocket server URL (replace with your Go server address)
-const wsUrl = 'ws://192.168.88.136:9090/ws';
+const wsUrl = 'ws://127.0.0.1:9090/ws';
 const ws = new WebSocket(wsUrl);
 
 // File stream to save the audio locally for testing
